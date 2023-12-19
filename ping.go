@@ -49,7 +49,6 @@
 // it calls the OnFinish callback.
 //
 // For a full ping example, see "cmd/ping/ping.go".
-//
 package ping
 
 import (
@@ -77,6 +76,7 @@ const (
 	trackerLength    = len(uuid.UUID{})
 	protocolICMP     = 1
 	protocolIPv6ICMP = 58
+	maxSeq           = 50
 )
 
 var (
@@ -88,12 +88,14 @@ var (
 func New(addr string) *Pinger {
 	r := rand.New(rand.NewSource(getSeed()))
 	firstUUID := uuid.New()
-	var firstSequence = map[uuid.UUID]map[int]struct{}{}
-	firstSequence[firstUUID] = make(map[int]struct{})
+	// var firstSequence = map[uuid.UUID]map[int]struct{}{}
+	// firstSequence[firstUUID] = make(map[int]struct{})
+	var firstSequence = map[int]*Packet{}
 	return &Pinger{
 		Count:      -1,
+		WindowSize: 30,
 		Interval:   time.Second,
-		RecordRtts: true,
+		RecordRtts: false,
 		Size:       timeSliceLength + trackerLength,
 		Timeout:    time.Duration(math.MaxInt64),
 
@@ -117,6 +119,51 @@ func NewPinger(addr string) (*Pinger, error) {
 	return p, p.Resolve()
 }
 
+var gPinger *Pinger
+var gError error = nil
+
+func Start(addr string) error {
+	return StartEx(addr, false)
+}
+
+func StartEx(addr string, privileged bool) error {
+	if gPinger != nil {
+		gPinger.Stop()
+	}
+
+	gPinger, gError = NewPinger(addr)
+	if gError != nil {
+		return gError
+	}
+	if privileged {
+		gPinger.protocol = "icmp"
+	} else {
+		gPinger.protocol = "udp"
+	}
+
+	go func() {
+		gError = gPinger.Run()
+	}()
+
+	return nil
+}
+
+func GetDefaultPinger() *Pinger {
+	return gPinger
+}
+
+func GetLossRate() (float64, error) {
+	if gPinger != nil && gError == nil {
+		return gPinger.PacketLoss(), nil
+	} else {
+		var err = errors.New("pinger isn't exist")
+		if gPinger != nil {
+			err = gError
+		}
+		return 0, err
+	}
+}
+
 // Pinger represents a packet sender/receiver.
 type Pinger struct {
 	// Interval is the wait time between each packet send. Default is 1s.
@@ -131,6 +178,8 @@ type Pinger struct {
 	// interrupted.
 	Count int
 
+	//
+	WindowSize int
 	// Debug runs in debug mode
 	Debug bool
 
@@ -196,7 +245,8 @@ type Pinger struct {
 	id       int
 	sequence int
 	// awaitingSequences are in-flight sequence numbers we keep track of to help remove duplicate receipts
-	awaitingSequences map[uuid.UUID]map[int]struct{}
+	// awaitingSequences map[uuid.UUID]map[int]struct{}
+	awaitingSequences map[int]*Packet
 	// network is one of "ip", "ip4", or "ip6".
 	network string
 	// protocol is "icmp" or "udp".
@@ -301,6 +351,54 @@ func (p *Pinger) updateStatistics(pkt *Packet) {
 	p.stddevm2 += delta * delta2
 
 	p.stdDevRtt = time.Duration(math.Sqrt(float64(p.stddevm2 / pktCount)))
+}
+
+func (p *Pinger) adjustStatistics(pkt *Packet) {
+	p.statsMu.Lock()
+	defer p.statsMu.Unlock()
+	if pkt == nil {
+		return
+	}
+
+	if pkt.Rtt <= p.minRtt {
+		var pos = p.sequence - p.WindowSize
+		for pos < p.sequence {
+			if pkt, exists := p.awaitingSequences[p.getRingPos(pos)]; exists && pkt != nil {
+				p.minRtt = pkt.Rtt
+				break
+			}
+		}
+	}
+
+	if pkt.Rtt >= p.maxRtt {
+		var pos = p.sequence - p.WindowSize
+		for pos < p.sequence {
+			if pkt, exists := p.awaitingSequences[p.getRingPos(pos)]; exists && pkt != nil {
+				p.maxRtt = pkt.Rtt
+				break
+			}
+		}
+	}
+
+	// pktCount := time.Duration(p.PacketsRecv)
+	// welford's online method for stddev
+	// https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Welford's_online_algorithm
+	p.avgRtt = (pkt.Rtt + time.Duration((p.PacketsRecv-1))*p.avgRtt) / time.Duration(p.PacketsRecv)
+
+	// delta := pkt.Rtt - p.avgRtt
+	// p.avgRtt += delta / pktCount
+	// delta2 := pkt.Rtt - p.avgRtt
+	// p.stddevm2 += delta * delta2
+
+}
+
+func (p *Pinger) getRingPos(pos int) int {
+	for pos < 0 {
+		pos += maxSeq
+	}
+	pos = pos % maxSeq
+
+	return pos
 }
 
 // SetIPAddr sets the ip address of the target host.
@@ -459,11 +557,11 @@ func (p *Pinger) runLoop(
 		logger = NoopLogger{}
 	}
 
-	timeout := time.NewTicker(p.Timeout)
+	// timeout := time.NewTicker(p.Timeout)
 	interval := time.NewTicker(p.Interval)
 	defer func() {
 		interval.Stop()
-		timeout.Stop()
+		// timeout.Stop()
 	}()
 
 	if err := p.sendICMP(conn); err != nil {
@@ -475,8 +573,8 @@ func (p *Pinger) runLoop(
 		case <-p.done:
 			return nil
 
-		case <-timeout.C:
-			return nil
+		// case <-timeout.C:
+		// 	return nil
 
 		case r := <-recvCh:
 			err := p.processPacket(r)
@@ -547,6 +645,20 @@ func (p *Pinger) Statistics() *Statistics {
 		StdDevRtt:             p.stdDevRtt,
 	}
 	return &s
+}
+
+func (p *Pinger) PacketLoss() float64 {
+	p.statsMu.RLock()
+	defer p.statsMu.RUnlock()
+
+	var pos = p.getRingPos(p.sequence - 1)
+
+	var sent = p.PacketsSent
+	if myPkt, exists := p.awaitingSequences[pos]; exists && myPkt == nil {
+		sent -= 1
+	}
+
+	return float64(sent-p.PacketsRecv) / float64(sent) * 100
 }
 
 type expBackoff struct {
@@ -675,16 +787,27 @@ func (p *Pinger) processPacket(recv *packet) error {
 		timestamp := bytesToTime(pkt.Data[:timeSliceLength])
 		inPkt.Rtt = receivedAt.Sub(timestamp)
 		inPkt.Seq = pkt.Seq
+
+		var len = p.getRingPos(p.sequence - pkt.Seq)
+
+		if len > p.WindowSize {
+			return nil
+		}
 		// If we've already received this sequence, ignore it.
-		if _, inflight := p.awaitingSequences[*pktUUID][pkt.Seq]; !inflight {
-			p.PacketsRecvDuplicates++
-			if p.OnDuplicateRecv != nil {
-				p.OnDuplicateRecv(inPkt)
+		// if _, inflight := p.awaitingSequences[*pktUUID][pkt.Seq]; !inflight {
+		if myPkt, exists := p.awaitingSequences[pkt.Seq]; exists {
+			if myPkt != nil {
+				p.PacketsRecvDuplicates++
+				if p.OnDuplicateRecv != nil {
+					p.OnDuplicateRecv(inPkt)
+				}
 			}
+		} else {
 			return nil
 		}
 		// remove it from the list of sequences we're waiting for so we don't get duplicates.
-		delete(p.awaitingSequences[*pktUUID], pkt.Seq)
+		// delete(p.awaitingSequences[*pktUUID], pkt.Seq)
+		p.awaitingSequences[pkt.Seq] = inPkt
 		p.updateStatistics(inPkt)
 	default:
 		// Very bad, not sure how this can happen
@@ -753,14 +876,26 @@ func (p *Pinger) sendICMP(conn packetConn) error {
 			handler(outPkt)
 		}
 		// mark this sequence as in-flight
-		p.awaitingSequences[currentUUID][p.sequence] = struct{}{}
+		// p.awaitingSequences[currentUUID][p.sequence] = struct{}{}
+		p.awaitingSequences[p.sequence] = nil
 		p.PacketsSent++
-		p.sequence++
-		if p.sequence > 65535 {
-			newUUID := uuid.New()
-			p.trackerUUIDs = append(p.trackerUUIDs, newUUID)
-			p.awaitingSequences[newUUID] = make(map[int]struct{})
-			p.sequence = 0
+		// p.sequence++
+		p.sequence = p.getRingPos(p.sequence + 1)
+		// if p.sequence >= 65535 {
+		// 	newUUID := uuid.New()
+		// 	p.awaitingSequences[newUUID] = make(map[int]struct{})
+		// 	p.sequence = 0
+		// }
+
+		var pos = p.getRingPos(p.sequence - p.WindowSize)
+
+		if myPkt, exists := p.awaitingSequences[pos]; exists {
+			if myPkt != nil {
+				p.PacketsRecv--
+			}
+			p.PacketsSent--
+			p.adjustStatistics(myPkt)
+			delete(p.awaitingSequences, pos)
 		}
 		break
 	}
