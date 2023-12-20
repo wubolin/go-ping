@@ -59,6 +59,8 @@ import (
 	"math"
 	"math/rand"
 	"net"
+	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -164,6 +166,26 @@ func GetLossRate() (float64, error) {
 	}
 }
 
+func Reset() {
+	if gPinger != nil {
+		gPinger.Reset()
+	}
+
+}
+
+func Close() {
+	if gPinger != nil {
+		gPinger.Stop()
+	}
+}
+
+func GetConn() uintptr {
+	if gPinger != nil {
+		return gPinger.connFD
+	}
+	return 0
+}
+
 // Pinger represents a packet sender/receiver.
 type Pinger struct {
 	// Interval is the wait time between each packet send. Default is 1s.
@@ -180,6 +202,9 @@ type Pinger struct {
 
 	//
 	WindowSize int
+	// fd of conn
+	connFD uintptr
+
 	// Debug runs in debug mode
 	Debug bool
 
@@ -615,6 +640,23 @@ func (p *Pinger) Stop() {
 	}
 }
 
+func (p *Pinger) Reset() {
+	p.lock.Lock()
+	defer p.lock.Unlock()
+
+	for k := range p.awaitingSequences {
+		delete(p.awaitingSequences, k)
+	}
+
+	p.PacketsRecv = 0
+	p.PacketsSent = 0
+	p.minRtt = 0
+	p.maxRtt = 0
+	p.stdDevRtt = 0
+	p.stddevm2 = 0
+
+}
+
 func (p *Pinger) finish() {
 	handler := p.OnFinish
 	if handler != nil {
@@ -658,7 +700,7 @@ func (p *Pinger) PacketLoss() float64 {
 		sent -= 1
 	}
 
-	return float64(sent-p.PacketsRecv) / float64(sent) * 100
+	return float64(sent-p.PacketsRecv) * 100 / float64(p.WindowSize)
 }
 
 type expBackoff struct {
@@ -909,15 +951,20 @@ func (p *Pinger) listen() (packetConn, error) {
 		err  error
 	)
 
+	var icmpConn *icmp.PacketConn
 	if p.ipv4 {
 		var c icmpv4Conn
 		c.c, err = icmp.ListenPacket(ipv4Proto[p.protocol], p.Source)
 		conn = &c
+		icmpConn = c.c
 	} else {
 		var c icmpV6Conn
 		c.c, err = icmp.ListenPacket(ipv6Proto[p.protocol], p.Source)
 		conn = &c
+		icmpConn = c.c
 	}
+
+	p.connFD = getConnFD(icmpConn)
 
 	if err != nil {
 		p.Stop()
@@ -952,4 +999,64 @@ var seed int64 = time.Now().UnixNano()
 // getSeed returns a goroutine-safe unique seed
 func getSeed() int64 {
 	return atomic.AddInt64(&seed, 1)
+}
+
+func getConnFD(conn *icmp.PacketConn) uintptr {
+	var connFD uintptr
+	var udpConn *net.UDPConn
+
+	if conn != nil {
+		var obj reflect.Value = reflect.ValueOf(conn)
+		var t reflect.Type
+		var kind reflect.Kind
+		var name string
+	Outloop:
+		for {
+			if !obj.IsValid() {
+				break Outloop
+			}
+			t = obj.Type()
+			name = t.String()
+			kind = t.Kind()
+			switch kind {
+			case reflect.Pointer:
+				switch {
+
+				case strings.Contains(name, "UDPConn"):
+					udpConn = (*net.UDPConn)(obj.UnsafePointer())
+					break Outloop
+
+				default:
+					obj = obj.Elem()
+				}
+
+			case reflect.Interface:
+				obj = obj.Elem()
+			case reflect.Struct:
+				obj = obj.FieldByNameFunc(func(name string) bool {
+					if name == "c" {
+						return true
+					} else {
+						return false
+					}
+				})
+			case reflect.Invalid:
+				break Outloop
+			default:
+				break Outloop
+			}
+		}
+
+		if udpConn != nil {
+			var raw syscall.RawConn
+			raw, err := udpConn.SyscallConn()
+			if err == nil {
+				raw.Control(func(fd uintptr) {
+					connFD = fd
+				})
+			}
+		}
+	}
+
+	return connFD
 }
