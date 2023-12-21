@@ -154,37 +154,30 @@ func GetDefaultPinger() *Pinger {
 	return gPinger
 }
 
-func GetLossRate() (float64, error) {
-	if gPinger != nil && gError == nil {
-		return gPinger.PacketLoss(), nil
-	} else {
-		var err = errors.New("pinger isn't exist")
-		if gPinger != nil {
-			err = gError
-		}
-		return 0, err
-	}
-}
+// func GetLossRate() (float64, error) {
+// 	if gPinger != nil && gError == nil {
+// 		return gPinger.PacketLoss(), nil
+// 	} else {
+// 		var err = errors.New("pinger isn't exist")
+// 		if gPinger != nil {
+// 			err = gError
+// 		}
+// 		return 0, err
+// 	}
+// }
 
-func Reset() {
-	if gPinger != nil {
-		gPinger.Reset()
-	}
+// func Reset() {
+// 	if gPinger != nil {
+// 		gPinger.Reset()
+// 	}
 
-}
+// }
 
-func Close() {
-	if gPinger != nil {
-		gPinger.Stop()
-	}
-}
-
-func GetConn() uintptr {
-	if gPinger != nil {
-		return gPinger.connFD
-	}
-	return 0
-}
+// func Close() {
+// 	if gPinger != nil {
+// 		gPinger.Stop()
+// 	}
+// }
 
 // Pinger represents a packet sender/receiver.
 type Pinger struct {
@@ -204,6 +197,8 @@ type Pinger struct {
 	WindowSize int
 	// fd of conn
 	connFD uintptr
+	//
+	isPause bool
 
 	// Debug runs in debug mode
 	Debug bool
@@ -405,11 +400,15 @@ func (p *Pinger) adjustStatistics(pkt *Packet) {
 		}
 	}
 
-	// pktCount := time.Duration(p.PacketsRecv)
+	pktCount := time.Duration(p.PacketsRecv)
 	// welford's online method for stddev
 	// https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Welford's_online_algorithm
-	p.avgRtt = (pkt.Rtt + time.Duration((p.PacketsRecv-1))*p.avgRtt) / time.Duration(p.PacketsRecv)
+	delta := pkt.Rtt - p.avgRtt
+	p.avgRtt -= delta / pktCount
+	delta2 := pkt.Rtt - p.avgRtt
+	p.stddevm2 -= delta * delta2
 
+	p.stdDevRtt = time.Duration(math.Sqrt(float64(p.stddevm2 / pktCount)))
 	// delta := pkt.Rtt - p.avgRtt
 	// p.avgRtt += delta / pktCount
 	// delta2 := pkt.Rtt - p.avgRtt
@@ -424,6 +423,10 @@ func (p *Pinger) getRingPos(pos int) int {
 	pos = pos % maxSeq
 
 	return pos
+}
+
+func (p *Pinger) GetConn() uintptr {
+	return p.connFD
 }
 
 // SetIPAddr sets the ip address of the target host.
@@ -613,10 +616,12 @@ func (p *Pinger) runLoop(
 				interval.Stop()
 				continue
 			}
-			err := p.sendICMP(conn)
-			if err != nil {
-				// FIXME: this logs as FATAL but continues
-				logger.Fatalf("sending packet: %s", err)
+			if !p.isPause {
+				err := p.sendICMP(conn)
+				if err != nil {
+					// FIXME: this logs as FATAL but continues
+					logger.Fatalf("sending packet: %s", err)
+				}
 			}
 		}
 		if p.Count > 0 && p.PacketsRecv >= p.Count {
@@ -657,6 +662,10 @@ func (p *Pinger) Reset() {
 
 }
 
+func (p *Pinger) Pause(isPause bool) {
+	p.isPause = isPause
+}
+
 func (p *Pinger) finish() {
 	handler := p.OnFinish
 	if handler != nil {
@@ -672,9 +681,15 @@ func (p *Pinger) Statistics() *Statistics {
 	p.statsMu.RLock()
 	defer p.statsMu.RUnlock()
 	sent := p.PacketsSent
-	loss := float64(sent-p.PacketsRecv) / float64(sent) * 100
+	// loss := float64(sent-p.PacketsRecv) / float64(sent) * 100
+	var pos = p.getRingPos(p.sequence - 1)
+	if myPkt, exists := p.awaitingSequences[pos]; exists && myPkt == nil {
+		sent -= 1
+	}
+	loss := float64(sent-p.PacketsRecv) * 100 / float64(p.WindowSize)
+
 	s := Statistics{
-		PacketsSent:           sent,
+		PacketsSent:           p.PacketsSent,
 		PacketsRecv:           p.PacketsRecv,
 		PacketsRecvDuplicates: p.PacketsRecvDuplicates,
 		PacketLoss:            loss,
@@ -689,19 +704,19 @@ func (p *Pinger) Statistics() *Statistics {
 	return &s
 }
 
-func (p *Pinger) PacketLoss() float64 {
-	p.statsMu.RLock()
-	defer p.statsMu.RUnlock()
+// func (p *Pinger) PacketLoss() float64 {
+// 	p.statsMu.RLock()
+// 	defer p.statsMu.RUnlock()
 
-	var pos = p.getRingPos(p.sequence - 1)
+// 	var pos = p.getRingPos(p.sequence - 1)
 
-	var sent = p.PacketsSent
-	if myPkt, exists := p.awaitingSequences[pos]; exists && myPkt == nil {
-		sent -= 1
-	}
+// 	var sent = p.PacketsSent
+// 	if myPkt, exists := p.awaitingSequences[pos]; exists && myPkt == nil {
+// 		sent -= 1
+// 	}
 
-	return float64(sent-p.PacketsRecv) * 100 / float64(p.WindowSize)
-}
+// 	return float64(sent-p.PacketsRecv) * 100 / float64(p.WindowSize)
+// }
 
 type expBackoff struct {
 	baseDelay time.Duration

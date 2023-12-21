@@ -70,8 +70,9 @@ func main() {
 	}()
 
 	pinger.OnRecv = func(pkt *ping.Packet) {
-		fmt.Printf("%d bytes from %s: icmp_seq=%d time=%v ttl=%v loss=%v%% \n",
-			pkt.Nbytes, pkt.IPAddr, pkt.Seq, pkt.Rtt, pkt.Ttl, pinger.PacketLoss())
+		s := pinger.Statistics()
+		fmt.Printf("%d bytes from %s: icmp_seq=%d time=%v ttl=%v loss=%v%%  avgRtt=%v receivePkt=%v\n",
+			pkt.Nbytes, pkt.IPAddr, pkt.Seq, pkt.Rtt, pkt.Ttl, s.PacketLoss, s.AvgRtt, s.PacketsRecv)
 	}
 	pinger.OnDuplicateRecv = func(pkt *ping.Packet) {
 		fmt.Printf("%d bytes from %s: icmp_seq=%d time=%v ttl=%v (DUP!)\n",
