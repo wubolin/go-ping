@@ -121,38 +121,36 @@ func NewPinger(addr string) (*Pinger, error) {
 	return p, p.Resolve()
 }
 
-var gPinger *Pinger
-var gError error = nil
+// var gPinger *Pinger
+// var gError error = nil
 
-func Start(addr string) error {
+func Start(addr string) (*Pinger, error) {
 	return StartEx(addr, false)
 }
 
-func StartEx(addr string, privileged bool) error {
-	if gPinger != nil {
-		gPinger.Stop()
+func StartEx(addr string, privileged bool) (*Pinger, error) {
+
+	pinger, err := NewPinger(addr)
+	if err != nil {
+		return nil, err
 	}
 
-	gPinger, gError = NewPinger(addr)
-	if gError != nil {
-		return gError
-	}
 	if privileged {
-		gPinger.protocol = "icmp"
+		pinger.protocol = "icmp"
 	} else {
-		gPinger.protocol = "udp"
+		pinger.protocol = "udp"
 	}
 
 	go func() {
-		gError = gPinger.Run()
+		pinger.Run()
 	}()
 
-	return nil
+	return pinger, nil
 }
 
-func GetDefaultPinger() *Pinger {
-	return gPinger
-}
+// func GetDefaultPinger() *Pinger {
+// 	return gPinger
+// }
 
 // func GetLossRate() (float64, error) {
 // 	if gPinger != nil && gError == nil {
