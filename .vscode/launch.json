@@ -10,7 +10,7 @@
             "request": "launch",
             "mode": "auto",
             "program": "${fileDirname}",
-            "args": "api-test.wireguard-vpn.com"
+            "args": "10.0.0.1"
         }
     ]
 }

@@ -78,7 +78,7 @@ const (
 	trackerLength    = len(uuid.UUID{})
 	protocolICMP     = 1
 	protocolIPv6ICMP = 58
-	maxSeq           = 50
+	maxSeq           = 65535
 )
 
 var (
