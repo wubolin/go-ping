@@ -38,7 +38,7 @@ func (c *udpConn) SetReadDeadline(t time.Time) error {
 }
 
 func (c *udpConn) WriteTo(b []byte, dst net.Addr) (int, error) {
-	return c.c.Write(b)
+	return c.c.WriteTo(b, dst)
 }
 
 func (c *udpConn) SetFlagTTL() error {

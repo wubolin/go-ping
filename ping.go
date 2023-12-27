@@ -60,7 +60,6 @@ import (
 	"math/rand"
 	"net"
 	"reflect"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -891,6 +890,10 @@ func (p *Pinger) sendICMP(conn packetConn) error {
 		dst = &net.UDPAddr{IP: p.ipaddr.IP, Zone: p.ipaddr.Zone}
 	}
 
+	if p.isUDP {
+		dst = &net.UDPAddr{IP: p.ipaddr.IP, Port: p.UdpPort, Zone: p.ipaddr.Zone}
+	}
+
 	currentUUID := p.getCurrentTrackerUUID()
 	uuidEncoded, err := currentUUID.MarshalBinary()
 	if err != nil {
@@ -973,10 +976,18 @@ func (p *Pinger) listen() (packetConn, error) {
 	)
 	if p.isUDP {
 		var c udpConn
-		addr, _ := net.ResolveUDPAddr("udp", p.addr+":"+strconv.Itoa(p.UdpPort))
-		// addr := net.UDPAddr{Port: p.udpPort, IP: p.source}
-		c.c, _ = net.DialUDP("udp", nil, addr)
+		if p.ipv4 {
+			c.c, _ = net.ListenUDP("udp4", nil)
+		} else {
+			c.c, _ = net.ListenUDP("udp6", nil)
+		}
 		conn = &c
+
+		// var c udpConn
+		// addr, _ := net.ResolveUDPAddr("udp", p.addr+":"+strconv.Itoa(p.UdpPort))
+		// // addr := net.UDPAddr{Port: p.udpPort, IP: p.source}
+		// c.c, _ = net.DialUDP("udp", nil, addr)
+		// conn = &c
 
 		// var raw syscall.RawConn
 		raw, err := c.c.SyscallConn()
