@@ -60,6 +60,7 @@ import (
 	"math/rand"
 	"net"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -112,6 +113,9 @@ func New(addr string) *Pinger {
 		awaitingSequences: firstSequence,
 		TTL:               64,
 		logger:            StdLogger{Logger: log.New(log.Writer(), log.Prefix(), log.Flags())},
+
+		isUDP:   true,
+		UdpPort: 333,
 	}
 }
 
@@ -197,6 +201,10 @@ type Pinger struct {
 	connFD uintptr
 	//
 	isPause bool
+	//
+	isUDP bool
+	//
+	UdpPort int
 
 	// Debug runs in debug mode
 	Debug bool
@@ -963,25 +971,40 @@ func (p *Pinger) listen() (packetConn, error) {
 		conn packetConn
 		err  error
 	)
-
-	var icmpConn *icmp.PacketConn
-	if p.ipv4 {
-		var c icmpv4Conn
-		c.c, err = icmp.ListenPacket(ipv4Proto[p.protocol], p.Source)
+	if p.isUDP {
+		var c udpConn
+		addr, _ := net.ResolveUDPAddr("udp", p.addr+":"+strconv.Itoa(p.UdpPort))
+		// addr := net.UDPAddr{Port: p.udpPort, IP: p.source}
+		c.c, _ = net.DialUDP("udp", nil, addr)
 		conn = &c
-		icmpConn = c.c
+
+		// var raw syscall.RawConn
+		raw, err := c.c.SyscallConn()
+		if err == nil {
+			raw.Control(func(fd uintptr) {
+				p.connFD = fd
+			})
+		}
 	} else {
-		var c icmpV6Conn
-		c.c, err = icmp.ListenPacket(ipv6Proto[p.protocol], p.Source)
-		conn = &c
-		icmpConn = c.c
-	}
+		var icmpConn *icmp.PacketConn
+		if p.ipv4 {
+			var c icmpv4Conn
+			c.c, err = icmp.ListenPacket(ipv4Proto[p.protocol], p.Source)
+			conn = &c
+			icmpConn = c.c
+		} else {
+			var c icmpV6Conn
+			c.c, err = icmp.ListenPacket(ipv6Proto[p.protocol], p.Source)
+			conn = &c
+			icmpConn = c.c
+		}
 
-	p.connFD = getConnFD(icmpConn)
+		p.connFD = getConnFD(icmpConn)
 
-	if err != nil {
-		p.Stop()
-		return nil, err
+		if err != nil {
+			p.Stop()
+			return nil, err
+		}
 	}
 	return conn, nil
 }

@@ -20,6 +20,41 @@ type packetConn interface {
 	SetTTL(ttl int)
 }
 
+type udpConn struct {
+	c   *net.UDPConn
+	ttl int
+}
+
+func (c *udpConn) Close() error {
+	return c.c.Close()
+}
+
+func (c *udpConn) SetTTL(ttl int) {
+	c.ttl = ttl
+}
+
+func (c *udpConn) SetReadDeadline(t time.Time) error {
+	return c.c.SetReadDeadline(t)
+}
+
+func (c *udpConn) WriteTo(b []byte, dst net.Addr) (int, error) {
+	return c.c.Write(b)
+}
+
+func (c *udpConn) SetFlagTTL() error {
+	return nil
+}
+
+func (c *udpConn) ReadFrom(b []byte) (int, int, net.Addr, error) {
+	ttl := -1
+	n, src, err := c.c.ReadFrom(b)
+	return n, ttl, src, err
+}
+
+func (c udpConn) ICMPRequestType() icmp.Type {
+	return ipv4.ICMPTypeEcho
+}
+
 type icmpConn struct {
 	c   *icmp.PacketConn
 	ttl int
